@@ -552,6 +552,17 @@ Eigen::VectorXd getQvel(const mjModel* m, mjData* d) {
   return MapVectorXd(d->qvel, m->nv); 
 }
 
+constexpr char kAttrSpeed[] = "speed";
+
+std::optional<mjtNum> ReadOptionalDoubleAttr(const mjModel* m, int instance,
+                                             const char* attr) {
+  const char* value = mj_getPluginConfig(m, instance, attr);
+  if (value == nullptr || value[0] == '\0') {
+    return std::nullopt;
+  }
+  return std::strtod(value, nullptr);
+}
+
 class Conveyor {
   public:
   Conveyor(const mjModel* m, mjData* d, int instance);
@@ -563,6 +574,7 @@ class Conveyor {
   private:
     int id_{-1}; // index of body to which plugin is attached
     std::string name_; // name of body to which plugin is attached
+    mjtNum speed_{0.0}; // speed of conveyor along the y axis
 };
 
 Conveyor::Conveyor(const mjModel* m, mjData* d, int instance) {
@@ -583,6 +595,15 @@ Conveyor::Conveyor(const mjModel* m, mjData* d, int instance) {
       mju_warning("Conveyor attached to <unknown> body with id %d", id_);
     }
   }
+
+  // Read speed attribute
+  auto maybe_speed = ReadOptionalDoubleAttr(m, instance, kAttrSpeed);
+  if (maybe_speed) {
+    speed_ = *maybe_speed;
+  } else {
+    mju_warning("Conveyor speed attribute missing, defaulting to 0.1");
+    speed_ = 0.1;
+  }
 }
 
 void Conveyor::Compute(const mjModel* m, mjData* d, int instance) {
@@ -593,7 +614,7 @@ void Conveyor::Compute(const mjModel* m, mjData* d, int instance) {
   }
 
   Vector6d spatial_force;
-  const Eigen::Vector3d velocity(0.0, -0.1, 0.0);
+  const Eigen::Vector3d velocity(0.0, speed_, 0.0);
 
   int cid = id_;
   for (int i = 0; i < d->ncon; ++i) {
@@ -682,8 +703,8 @@ void registerPlugins() {
   };
   plugin.reset = +[](const mjModel* m, mjtNum* plugin_state, void* plugin_data,
     int instance) {
-    // auto conveyor = reinterpret_cast<Conveyor*>(plugin_data);
-    // conveyor->Reset();
+    auto conveyor = reinterpret_cast<Conveyor*>(plugin_data);
+    conveyor->Reset();
 };
   mjp_registerPlugin(&plugin);
 }
