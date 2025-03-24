@@ -593,7 +593,7 @@ void Conveyor::Compute(const mjModel* m, mjData* d, int instance) {
   }
 
   Vector6d spatial_force;
-  const Eigen::Vector3d velocity(0.0, -1e-4, 0.0);
+  const Eigen::Vector3d velocity(0.0, -0.1, 0.0);
 
   int cid = id_;
   for (int i = 0; i < d->ncon; ++i) {
@@ -605,13 +605,10 @@ void Conveyor::Compute(const mjModel* m, mjData* d, int instance) {
       Eigen::Matrix3d sim_to_body = getBodyGlobalTransform(d, cid).linear();
       Eigen::Vector3d v_conveyor = sim_to_body * velocity;
 
-      std::cout << "------------------------\nConveyor velocity: " << v_conveyor.transpose() << std::endl;
-
       // Normal force magnitude
       mj_contactForce(m, d, i, spatial_force.data());
       double N =
         spatial_force[0]; // According to mujoco's documentation, normal is defined as the x axis
-      std::cout << "Normal force: " << N << std::endl;
 
       // Body jacobian
       MatrixXdRowMajor J_body(3, m->nv);
@@ -622,12 +619,10 @@ void Conveyor::Compute(const mjModel* m, mjData* d, int instance) {
 
       // Body velocity at contact point
       Eigen::Vector3d v_body = J_body * getQvel(m, d);
-      std::cout << "Body velocity: " << v_body.transpose() << std::endl;
 
       // Adjust frictional force along the conveyor axis
       // Get contact point velocity along the conveyor motion
       double v_rel = (v_body - v_conveyor).dot(v_conveyor.normalized());
-      std::cout << "Relative velocity: " << v_rel << std::endl;
       if (v_rel > 0) {
         // Body point faster than conveyor so let the friction from the static surface effect
         // normally
@@ -640,18 +635,13 @@ void Conveyor::Compute(const mjModel* m, mjData* d, int instance) {
       }
       // Compensate for the friction of the static surface + add friction corresponding to moving
       // conveyor
-      Eigen::Vector3d friction_force = N * (0.02 * contact.friction[0]) * v_conveyor.normalized();
-      std::cout << "Friction force: " << friction_force.transpose() << std::endl;
+      Eigen::Vector3d friction_force = N * (2 * contact.friction[0]) * v_conveyor.normalized();
 
       // Calculate conveyor frictional force in generalized coordinates
       Eigen::VectorXd qfrc = J_body.transpose() * friction_force;
-      std::cout << "Generalized friction force: " << qfrc.transpose() << std::endl;
 
       // Add contact force
-      MapVectorXd(d->qfrc_applied, m->nv) += qfrc;
-      static long long int count = 0;
-      std::cout << "Applying force " << count << std::endl;
-      count++;
+      MapVectorXd(d->qfrc_passive, m->nv) += qfrc;
     }
   }
 
