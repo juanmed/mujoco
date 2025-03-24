@@ -150,6 +150,24 @@ if(APPLE)
   target_link_libraries(libmujoco_simulate PUBLIC "-framework Cocoa")
 endif()
 
+# ==================== EIGEN ===================================================
+add_compile_definitions(EIGEN_MPL2_ONLY)
+findorfetch(
+  USE_SYSTEM_PACKAGE
+  OFF
+  PACKAGE_NAME
+  Eigen3
+  LIBRARY_NAME
+  eigen
+  GIT_REPO
+  https://gitlab.com/libeigen/eigen
+  GIT_TAG
+  66f7f51b7e069d0a03a21157fa60b24aece69aeb
+  TARGETS
+  Eigen3::Eigen
+  EXCLUDE_FROM_ALL
+)
+
 # Build simulate executable
 if(SIMULATE_BUILD_EXECUTABLE)
   if(APPLE)
@@ -179,6 +197,8 @@ if(SIMULATE_BUILD_EXECUTABLE)
     mujoco::mujoco
     glfw
     Threads::Threads
+    lodepng
+    Eigen3::Eigen
   )
 
   if(APPLE)

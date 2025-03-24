@@ -25,10 +25,14 @@
 #include <string>
 #include <thread>
 
+#include <mujoco/mjplugin.h>
 #include <mujoco/mujoco.h>
 #include "glfw_adapter.h"
 #include "simulate.h"
 #include "array_safety.h"
+
+#include <Eigen/Core>
+#include <Eigen/Geometry>
 
 #define MUJOCO_PLUGIN_DIR "mujoco_plugin"
 
@@ -497,8 +501,207 @@ __attribute__((used, visibility("default"))) extern "C" void _mj_rosettaError(co
 }
 #endif
 
+using MapVector3d = Eigen::Map<Eigen::Vector3d>;
+using MapVectorXd = Eigen::Map<Eigen::VectorXd>;
+using Isometry3d = Eigen::Transform<double, 3, Eigen::Isometry>;
+using Isometry3f = Eigen::Transform<float, 3, Eigen::Isometry>;
+using Vector6d = Eigen::Matrix<double, 6, 1>;
+using MatrixXdRowMajor = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+
+// inline int getBodyId(const std::string& body_name)
+// {
+//   int bodyid = mj_name2id(impl->m, mjOBJ_BODY, body_name.c_str());
+//   if (bodyid == -1)
+//     mju_error("Could not find body with name %s", body_name.c_str());
+//   return bodyid;
+// }
+
+Isometry3d getBodyGlobalPose(const mjData* d, int bodyid)
+{
+  double qw = d->xquat[4 * bodyid + 0];
+  double qx = d->xquat[4 * bodyid + 1];
+  double qy = d->xquat[4 * bodyid + 2];
+  double qz = d->xquat[4 * bodyid + 3];
+
+  Eigen::Quaternion<double> quat(qw, qx, qy, qz);
+
+  Isometry3d pose;
+  pose.linear() = quat.toRotationMatrix();
+  pose.translation() = MapVectorXd(&d->xpos[bodyid * 3], 3);
+
+  return pose;
+}
+
+Isometry3d getBodyGlobalTransform(const mjData* d, int bodyid)
+{
+  double qw = d->xquat[4 * bodyid + 0];
+  double qx = d->xquat[4 * bodyid + 1];
+  double qy = d->xquat[4 * bodyid + 2];
+  double qz = d->xquat[4 * bodyid + 3];
+
+  Eigen::Quaternion<double> quat(qw, qx, qy, qz);
+
+  Isometry3d transform;
+  transform.linear() = quat.toRotationMatrix();
+  transform.translation() = MapVector3d(&d->xpos[3 * bodyid]);
+
+  return transform;
+}
+
+Eigen::VectorXd getQvel(const mjModel* m, mjData* d) { 
+  return MapVectorXd(d->qvel, m->nv); 
+}
+
+class Conveyor {
+  public:
+  Conveyor(const mjModel* m, mjData* d, int instance);
+  Conveyor(Conveyor&&) = default;
+  ~Conveyor() = default;
+  void Compute(const mjModel* m, mjData* d, int instance);
+  void Visualize(const mjModel* m, mjData* d, mjvScene* scn, int instance);
+  void Reset();
+  private:
+    int id_{-1}; // index of body to which plugin is attached
+    std::string name_; // name of body to which plugin is attached
+};
+
+Conveyor::Conveyor(const mjModel* m, mjData* d, int instance) {
+  // Get index of body to which plugin is attached
+  for (int i = 0; i < m->nbody; i++) {
+    if (m->body_plugin[i] == instance) {
+        id_ = i;
+        break;
+    }
+  }
+  if (id_ < 0) {
+    mju_error("Could not find body attached to conveyor instance %d", instance);
+  } else {
+    name_ = mj_id2name(m, mjOBJ_BODY, id_);
+    if (!name_.empty()) {
+      mju_warning("Conveyor attached to body %s with id %d", name_.c_str(), id_);
+    } else {
+      mju_warning("Conveyor attached to <unknown> body with id %d", id_);
+    }
+  }
+}
+
+void Conveyor::Compute(const mjModel* m, mjData* d, int instance) {
+  // Check valid id
+  if (id_ < 0) {
+    mju_error("Invalid body id %d", id_);
+    return;
+  }
+
+  Vector6d spatial_force;
+  const Eigen::Vector3d velocity(0.0, -1e-4, 0.0);
+
+  int cid = id_;
+  for (int i = 0; i < d->ncon; ++i) {
+    auto& contact = d->contact[i];
+    int body1 = m->geom_bodyid[contact.geom1];
+    int body2 = m->geom_bodyid[contact.geom2];
+
+    if (body1 == cid || body2 == cid) {
+      Eigen::Matrix3d sim_to_body = getBodyGlobalTransform(d, cid).linear();
+      Eigen::Vector3d v_conveyor = sim_to_body * velocity;
+
+      std::cout << "------------------------\nConveyor velocity: " << v_conveyor.transpose() << std::endl;
+
+      // Normal force magnitude
+      mj_contactForce(m, d, i, spatial_force.data());
+      double N =
+        spatial_force[0]; // According to mujoco's documentation, normal is defined as the x axis
+      std::cout << "Normal force: " << N << std::endl;
+
+      // Body jacobian
+      MatrixXdRowMajor J_body(3, m->nv);
+      if (body1 != cid)
+        mj_jac(m, d, J_body.data(), nullptr, contact.pos, body1);
+      else
+        mj_jac(m, d, J_body.data(), nullptr, contact.pos, body2);
+
+      // Body velocity at contact point
+      Eigen::Vector3d v_body = J_body * getQvel(m, d);
+      std::cout << "Body velocity: " << v_body.transpose() << std::endl;
+
+      // Adjust frictional force along the conveyor axis
+      // Get contact point velocity along the conveyor motion
+      double v_rel = (v_body - v_conveyor).dot(v_conveyor.normalized());
+      std::cout << "Relative velocity: " << v_rel << std::endl;
+      if (v_rel > 0) {
+        // Body point faster than conveyor so let the friction from the static surface effect
+        // normally
+        return;
+      }
+      if (v_body.dot(v_conveyor.normalized()) < 0) {
+        // Body point moving in the opposite direction, friction from the static surface is already
+        // been applied
+        return;
+      }
+      // Compensate for the friction of the static surface + add friction corresponding to moving
+      // conveyor
+      Eigen::Vector3d friction_force = N * (0.02 * contact.friction[0]) * v_conveyor.normalized();
+      std::cout << "Friction force: " << friction_force.transpose() << std::endl;
+
+      // Calculate conveyor frictional force in generalized coordinates
+      Eigen::VectorXd qfrc = J_body.transpose() * friction_force;
+      std::cout << "Generalized friction force: " << qfrc.transpose() << std::endl;
+
+      // Add contact force
+      MapVectorXd(d->qfrc_applied, m->nv) += qfrc;
+      static long long int count = 0;
+      std::cout << "Applying force " << count << std::endl;
+      count++;
+    }
+  }
+
+}
+
+void Conveyor::Reset() {
+
+}
+
+void registerPlugins() {
+  mjpPlugin plugin;
+  mjp_defaultPlugin(&plugin);
+
+  plugin.name = "mujoco.custom.conveyor";
+  plugin.capabilityflags |= mjPLUGIN_PASSIVE;
+
+  const char* attributes[] = {"speed"};
+  plugin.nattribute = sizeof(attributes) / sizeof(attributes[0]);
+  plugin.attributes = attributes;
+  plugin.nstate = +[](const mjModel* m, int instance) { return 0; };
+
+  plugin.init = +[](const mjModel* m, mjData* d, int instance) {
+    auto* conveyor = new Conveyor(m, d, instance);
+    d->plugin_data[instance] = reinterpret_cast<uintptr_t>(conveyor);
+  return 0;
+  };
+  plugin.destroy = +[](mjData* d, int instance) {
+    delete reinterpret_cast<Conveyor*>(d->plugin_data[instance]);
+    d->plugin_data[instance] = 0;
+  };
+  plugin.compute =
+      +[](const mjModel* m, mjData* d, int instance, int type) {
+        auto conveyor = reinterpret_cast<Conveyor*>(d->plugin_data[instance]);
+        conveyor->Compute(m, d, instance);
+      };
+  plugin.visualize = +[](const mjModel* m, mjData* d, const mjvOption* opt, mjvScene* scn,
+                         int instance) {
+  };
+  plugin.reset = +[](const mjModel* m, mjtNum* plugin_state, void* plugin_data,
+    int instance) {
+    // auto conveyor = reinterpret_cast<Conveyor*>(plugin_data);
+    // conveyor->Reset();
+};
+  mjp_registerPlugin(&plugin);
+}
+
 // run event loop
 int main(int argc, char** argv) {
+
+  registerPlugins();
 
   // display an error if running on macOS under Rosetta 2
 #if defined(__APPLE__) && defined(__AVX__)
