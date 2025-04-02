@@ -623,13 +623,17 @@ void Conveyor::Compute(const mjModel* m, mjData* d, int instance) {
     int body2 = m->geom_bodyid[contact.geom2];
 
     if (body1 == cid || body2 == cid) {
+      std::cout << "\n--------\nContact between " << mj_id2name(m, mjOBJ_BODY, body1)
+                << " and " << mj_id2name(m, mjOBJ_BODY, body2) << std::endl;
       Eigen::Matrix3d sim_to_body = getBodyGlobalTransform(d, cid).linear();
       Eigen::Vector3d v_conveyor = sim_to_body * velocity;
+      std::cout << "Conveyor velocity: " << v_conveyor.transpose() << std::endl;
 
       // Normal force magnitude
       mj_contactForce(m, d, i, spatial_force.data());
       double N =
         spatial_force[0]; // According to mujoco's documentation, normal is defined as the x axis
+      std::cout << "Contact force: " << spatial_force.transpose() << std::endl;
 
       // Body jacobian
       MatrixXdRowMajor J_body(3, m->nv);
@@ -637,26 +641,33 @@ void Conveyor::Compute(const mjModel* m, mjData* d, int instance) {
         mj_jac(m, d, J_body.data(), nullptr, contact.pos, body1);
       else
         mj_jac(m, d, J_body.data(), nullptr, contact.pos, body2);
+      // std::cout << "Jacobian: " << J_body.transpose() << std::endl;
 
       // Body velocity at contact point
       Eigen::Vector3d v_body = J_body * getQvel(m, d);
+      std::cout << "Body velocity: " << v_body.transpose() << std::endl;
 
       // Adjust frictional force along the conveyor axis
       // Get contact point velocity along the conveyor motion
       double v_rel = (v_body - v_conveyor).dot(v_conveyor.normalized());
+      std::cout << "Relative velocity: " << v_rel << std::endl;
       if (v_rel > 0) {
         // Body point faster than conveyor so let the friction from the static surface effect
         // normally
         return;
       }
-      if (v_body.dot(v_conveyor.normalized()) < 0) {
-        // Body point moving in the opposite direction, friction from the static surface is already
-        // been applied
-        return;
-      }
+      double v_dir = v_body.dot(v_conveyor.normalized());
+      std::cout << "Direction of body velocity: " << v_dir << std::endl;
+      // if (std::abs(v_dir) < 1e-6) {
+      //   // Body point moving in the opposite direction, friction from the static surface is already
+      //   // been applied
+      //   return;
+      // }
       // Compensate for the friction of the static surface + add friction corresponding to moving
       // conveyor
+      std::cout << " Contact Friction coeff: " << contact.friction[0] << std::endl;
       Eigen::Vector3d friction_force = N * (2 * contact.friction[0]) * v_conveyor.normalized();
+      std::cout << "Friction force: " << friction_force.transpose() << std::endl;
 
       // Calculate conveyor frictional force in generalized coordinates
       Eigen::VectorXd qfrc = J_body.transpose() * friction_force;
