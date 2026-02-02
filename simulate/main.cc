@@ -532,8 +532,7 @@ Isometry3d getBodyGlobalPose(const mjData* d, int bodyid)
   return pose;
 }
 
-Isometry3d getBodyGlobalTransform(const mjData* d, int bodyid)
-{
+Isometry3d getBodyPose(const mjData *d, int bodyid) {
   double qw = d->xquat[4 * bodyid + 0];
   double qx = d->xquat[4 * bodyid + 1];
   double qy = d->xquat[4 * bodyid + 2];
@@ -613,8 +612,8 @@ void Conveyor::Compute(const mjModel* m, mjData* d, int instance) {
     return;
   }
 
-  Vector6d spatial_force;
-  const Eigen::Vector3d velocity(0.0, speed_, 0.0);
+  Vector6d contact_moment;
+  const Eigen::Vector3d velocity_body(0.0, speed_, 0.0);
 
   int cid = id_;
   for (int i = 0; i < d->ncon; ++i) {
@@ -625,15 +624,16 @@ void Conveyor::Compute(const mjModel* m, mjData* d, int instance) {
     if (body1 == cid || body2 == cid) {
       std::cout << "\n--------\nContact between " << mj_id2name(m, mjOBJ_BODY, body1)
                 << " and " << mj_id2name(m, mjOBJ_BODY, body2) << std::endl;
-      Eigen::Matrix3d sim_to_body = getBodyGlobalTransform(d, cid).linear();
-      Eigen::Vector3d v_conveyor = sim_to_body * velocity;
-      std::cout << "Conveyor velocity: " << v_conveyor.transpose() << std::endl;
+      Eigen::Matrix3d T_body_to_world = getBodyPose(d, cid).linear();
+      Eigen::Vector3d v_conveyor_world = T_body_to_world * velocity_body;
+      std::cout << "Conveyor velocity: " << v_conveyor_world.transpose()
+                << std::endl;
 
       // Normal force magnitude
-      mj_contactForce(m, d, i, spatial_force.data());
-      double N =
-        spatial_force[0]; // According to mujoco's documentation, normal is defined as the x axis
-      std::cout << "Contact force: " << spatial_force.transpose() << std::endl;
+      mj_contactForce(m, d, i, contact_moment.data());
+      double N = contact_moment[0]; // According to mujoco's documentation,
+                                    // normal is defined as the x axis
+      std::cout << "Contact force: " << contact_moment.transpose() << std::endl;
 
       // Body jacobian
       MatrixXdRowMajor J_body(3, m->nv);
@@ -643,30 +643,32 @@ void Conveyor::Compute(const mjModel* m, mjData* d, int instance) {
         mj_jac(m, d, J_body.data(), nullptr, contact.pos, body2);
       // std::cout << "Jacobian: " << J_body.transpose() << std::endl;
 
-      // Body velocity at contact point
+      // Contact velocity
       Eigen::Vector3d v_body = J_body * getQvel(m, d);
-      std::cout << "Body velocity: " << v_body.transpose() << std::endl;
+      std::cout << "Contact velocity: " << v_body.transpose() << std::endl;
 
       // Adjust frictional force along the conveyor axis
       // Get contact point velocity along the conveyor motion
-      double v_rel = (v_body - v_conveyor).dot(v_conveyor.normalized());
+      double v_rel =
+          (v_body - v_conveyor_world).dot(v_conveyor_world.normalized());
       std::cout << "Relative velocity: " << v_rel << std::endl;
       if (v_rel > 0) {
-        // Body point faster than conveyor so let the friction from the static surface effect
-        // normally
+        // Contact point faster than conveyor so let the friction from the
+        // static surface effect normally
         return;
       }
-      double v_dir = v_body.dot(v_conveyor.normalized());
+      double v_dir = v_body.dot(v_conveyor_world.normalized());
       std::cout << "Direction of body velocity: " << v_dir << std::endl;
-      // if (v_dir < 0) {
-      //   // Body point moving in the opposite direction, friction from the static surface is already
-      //   // been applied
-      //   return;  
-      // }
+      if (v_dir < 0) {
+        // Contact point moving in the opposite direction, friction from the
+        // static surface is already been applied
+        return;
+      }
       // Compensate for the friction of the static surface + add friction corresponding to moving
       // conveyor
       std::cout << " Contact Friction coeff: " << contact.friction[0] << std::endl;
-      Eigen::Vector3d friction_force = N * (2 * contact.friction[0]) * v_conveyor.normalized();
+      Eigen::Vector3d friction_force =
+          N * (2 * contact.friction[0]) * v_conveyor_world.normalized();
       std::cout << "Friction force: " << friction_force.transpose() << std::endl;
 
       // Calculate conveyor frictional force in generalized coordinates
