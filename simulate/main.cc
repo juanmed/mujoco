@@ -658,10 +658,10 @@ void Conveyor::Compute(const mjModel* m, mjData* d, int instance) {
       }
       double v_dir = v_body.dot(v_conveyor.normalized());
       std::cout << "Direction of body velocity: " << v_dir << std::endl;
-      // if (std::abs(v_dir) < 1e-6) {
+      // if (v_dir < 0) {
       //   // Body point moving in the opposite direction, friction from the static surface is already
       //   // been applied
-      //   return;
+      //   return;  
       // }
       // Compensate for the friction of the static surface + add friction corresponding to moving
       // conveyor
